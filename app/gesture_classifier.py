@@ -210,6 +210,18 @@ class TemporalStabilizer:
             self.locked_sign = target
         return self.get_text_state()
 
+    def force_commit_word(self, word: str) -> Dict[str, Any]:
+        """Commits a whole word (e.g. from a motion sign like the HELLO wave)."""
+        if self.current_word:
+            self._apply_sign_action("SPACE")
+        for ch in word.upper():
+            self._apply_sign_action(ch)
+        self._apply_sign_action("SPACE")
+        self.last_commit_time = time.time()
+        self.is_locked = True
+        self.locked_sign = word.upper()
+        return self.get_text_state()
+
     def _apply_sign_action(self, sign: str):
         if sign == "SPACE":
             if self.current_word:

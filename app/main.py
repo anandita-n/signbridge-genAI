@@ -35,6 +35,7 @@ from app.llm_engine import LLMEngine
 from app.tts_engine import TTSEngine
 from app.vision_engine import VisionEngine
 from app.motion_detector import MotionTracker
+from app.word_service import WordService
 
 app = FastAPI(
     title="SignBridge AI API",
@@ -62,9 +63,20 @@ vision_engine = VisionEngine(llm_engine)
 tts_engine = TTSEngine()
 
 motion_tracker = MotionTracker()
+word_service = WordService()
+WORD_MIN_CONFIDENCE = 0.35  # below this a word guess is shown but not added to the text
 
-# Pose letters the stabilizer may have already committed while J / Z was being drawn.
-MOTION_BASE_LETTERS = {"J": {"I", "J"}, "Z": {"D", "G", "X", "L", "Z"}}
+# Recent live frames (landmarks + classifier output), kept in memory only, for diagnosing
+# accuracy problems against a real camera. Exposed at GET /api/debug/frames.
+from collections import deque as _deque
+RECENT_FRAMES = _deque(maxlen=900)
+
+# Pose letters the stabilizer may have already committed while a motion sign was being
+# drawn. None means "any single letter" (an open waving hand can look like several).
+MOTION_BASE_LETTERS = {"J": {"I", "J"}, "Z": {"D", "G", "X", "L", "Z"},
+                       "HELLO": None, "ILY": set(), "YES": None, "PLEASE": None}
+# Signs from the motion tracker that are committed as whole words rather than a single letter.
+MOTION_WORDS = {"HELLO": ["HELLO"], "ILY": ["I", "LOVE", "YOU"], "YES": ["YES"], "PLEASE": ["PLEASE"]}
 
 # In-memory translation history
 TRANSLATION_HISTORY: List[Dict[str, Any]] = []
@@ -91,23 +103,36 @@ def demote_motion_letters(pred: Dict[str, Any], threshold: float) -> Dict[str, A
 def process_with_motion(pred: Dict[str, Any], points, threshold: float):
     """Runs the stabilizer plus the J/Z motion tracker. Returns (prediction, stabilizer result)."""
     pred = demote_motion_letters(pred, threshold)
-    stab_res = stabilizer.process_prediction(pred)
-
     motion_sign = motion_tracker.update(points)
+    if motion_tracker.last_shape == "ILY":
+        # The held "I love you" handshape looks like Y / L to the letter classifier but is never a letter.
+        stab_res = stabilizer.process_prediction({**pred, "sign": "NONE", "raw_sign": "NONE", "is_confident": False})
+    else:
+        stab_res = stabilizer.process_prediction(pred)
+
     if motion_sign:
         # Undo the pose letter (I / pointing) committed while the motion was being drawn.
+        base_letters = MOTION_BASE_LETTERS[motion_sign]
         if (stabilizer.is_locked
-                and stabilizer.locked_sign in MOTION_BASE_LETTERS[motion_sign]
+                and stabilizer.locked_sign
+                and len(stabilizer.locked_sign) == 1
+                and (base_letters is None or stabilizer.locked_sign in base_letters)
                 and time.time() - stabilizer.last_commit_time < 2.5):
             stabilizer._apply_sign_action("DEL")
-        text_state = stabilizer.force_commit_sign(motion_sign)
+        if motion_sign in MOTION_WORDS:
+            for word in MOTION_WORDS[motion_sign]:
+                text_state = stabilizer.force_commit_word(word)
+            shown = " ".join(MOTION_WORDS[motion_sign])
+        else:
+            text_state = stabilizer.force_commit_sign(motion_sign)
+            shown = motion_sign
         stab_res.update(
-            committed_action=motion_sign,
+            committed_action=shown,
             text_state=text_state,
-            active_sign=motion_sign,
+            active_sign=shown,
             is_locked=True,
         )
-        pred = {**pred, "sign": motion_sign, "raw_sign": motion_sign, "motion_detected": True}
+        pred = {**pred, "sign": shown, "raw_sign": shown, "motion_detected": True}
     return pred, stab_res
 
 
@@ -128,6 +153,12 @@ class FrameRecognizeRequest(BaseModel):
 class CaptionRequest(BaseModel):
     image_base64: str  # JPEG/PNG data URL or raw base64
     candidates: Optional[List[Dict[str, Any]]] = None  # classifier top-k: [{"sign": "M", "confidence": 0.6}]
+
+class WordRequest(BaseModel):
+    frames: List[str]                      # JPEG/PNG data URLs, in time order
+    fps: Optional[float] = 20.0            # capture rate of the frames
+    commit: Optional[bool] = True          # add a confident word to the Sign Buffer
+    min_confidence: Optional[float] = None  # stricter cut-off (automatic detection uses a higher one)
 
 class RefineRequest(BaseModel):
     raw_text: str
@@ -171,6 +202,8 @@ def get_status():
         "classes": gesture_classifier.classes_,
         "gemini_active": bool(llm_engine.api_key),
         "llm_model": llm_engine.model_name,
+        "word_model_ready": word_service.ready,
+        "word_vocab_size": len(word_service.words),
         "confidence_threshold": stabilizer.confidence_threshold,
         "stability_frames": stabilizer.stability_threshold,
         "voices_count": len(tts_engine.get_available_voices())
@@ -208,7 +241,16 @@ def recognize_landmarks(req: RecognizeLandmarksRequest):
     threshold = req.confidence_threshold or stabilizer.confidence_threshold
     pred = gesture_classifier.predict_raw_landmarks(req.landmarks, confidence_threshold=threshold)
     points = [(lm["x"], lm["y"]) for lm in req.landmarks]
+    raw_pred = pred
     pred, stab_res = process_with_motion(pred, points, threshold)
+
+    RECENT_FRAMES.append({
+        "t": round(time.time(), 3),
+        "landmarks": [[round(lm["x"], 5), round(lm["y"], 5), round(lm.get("z", 0.0), 5)] for lm in req.landmarks],
+        "candidates": raw_pred.get("candidates", []),
+        "shown": pred.get("sign"),
+        "committed": stab_res.get("committed_action"),
+    })
 
     if stab_res.get("committed_action"):
         print(f"[COMMITTED SIGN] ===> {stab_res['committed_action']} (Confidence: {pred['confidence']})")
@@ -265,6 +307,100 @@ def recognize_frame(req: FrameRecognizeRequest):
     }
 
 
+@app.get("/api/debug/motion")
+def debug_motion(last: int = 600):
+    """Recent per-frame hand data seen by the J/Z/HELLO motion tracker (in memory only).
+    Used to tune the motion thresholds against a real camera."""
+    frames = list(motion_tracker.debug)[-max(1, min(last, 3000)):]
+    return {"count": len(frames), "frames": frames}
+
+
+LAST_WORD_DEBUG: dict = {}
+
+
+@app.get("/api/debug/word")
+def debug_word():
+    """Summary of the most recent word recording (frames, hand visibility, top guesses)."""
+    return LAST_WORD_DEBUG
+
+
+@app.get("/api/word/vocab")
+def word_vocab():
+    """Words the word-level model can recognise."""
+    return {"ready": word_service.ready, "words": word_service.words, "error": word_service.error}
+
+
+def decode_word_frames(data_urls: List[str]) -> List[np.ndarray]:
+    if not 8 <= len(data_urls) <= 150:
+        raise HTTPException(status_code=400, detail="Send between 8 and 150 frames")
+    frames = []
+    for data_url in data_urls:
+        try:
+            raw = data_url.split("base64,")[-1]
+            img = cv2.imdecode(np.frombuffer(base64.b64decode(raw), np.uint8), cv2.IMREAD_COLOR)
+        except Exception:
+            img = None
+        if img is not None:
+            frames.append(img)
+    if len(frames) < 8:
+        raise HTTPException(status_code=400, detail="Could not decode enough frames")
+    return frames
+
+
+@app.post("/api/word/recognize")
+def recognize_word(req: WordRequest):
+    """
+    Word-level sign recognition: takes ~2 seconds of camera frames, tracks hands + body pose,
+    and classifies the clip with the sequence model. A confident word is added to the buffer.
+    """
+    if not word_service.ready:
+        raise HTTPException(status_code=503, detail=f"Word model unavailable: {word_service.error}")
+    t_start = time.perf_counter()
+    frames = decode_word_frames(req.frames)
+    t_decoded = time.perf_counter()
+
+    result = word_service.recognize(frames, fps=req.fps or 20.0, top_k=5)
+    top = result["top"]
+    LAST_WORD_DEBUG.clear()
+    LAST_WORD_DEBUG.update({
+        "frames": len(frames), "fps": req.fps, "size": list(frames[0].shape[:2]),
+        "hand_frame_ratio": round(result["hand_frame_ratio"], 3), "top": top,
+    })
+    t_done = time.perf_counter()
+    print(f"[word] decode={1000 * (t_decoded - t_start):.0f}ms track+model={1000 * (t_done - t_decoded):.0f}ms "
+          f"frames={len(frames)} fps={req.fps:.1f} hands={result['hand_frame_ratio']:.2f} "
+          f"top={[(t['word'], round(t['confidence'], 2)) for t in top[:3]]}", flush=True)
+    cutoff = max(WORD_MIN_CONFIDENCE, req.min_confidence or 0.0)
+    accepted = bool(top) and top[0]["confidence"] >= cutoff
+    word = top[0]["word"] if accepted else None
+
+    text_state = None
+    if accepted and req.commit:
+        text_state = stabilizer.force_commit_word(word)
+
+    if not top:
+        message = "No hands detected in the recording. Keep your hands and upper body in view."
+    elif not accepted:
+        message = "Not sure. If your word is one of these guesses, tap it to add it. Otherwise try again."
+    else:
+        message = f"Recognised \"{word}\"."
+    return {
+        "word": word,
+        "accepted": accepted,
+        "top": top,
+        "hand_frame_ratio": round(result["hand_frame_ratio"], 3),
+        "message": message,
+        "text_state": text_state,
+    }
+
+
+@app.get("/api/debug/frames")
+def debug_frames(last: int = 300):
+    """Recent live frames with classifier candidates (in memory only, for accuracy tuning)."""
+    frames = list(RECENT_FRAMES)[-max(1, min(last, 900)):]
+    return {"count": len(frames), "frames": frames}
+
+
 @app.post("/api/caption")
 def caption_sign_image(req: CaptionRequest):
     """
@@ -310,6 +446,19 @@ def get_buffer():
 def buffer_commit(req: Optional[BufferSetRequest] = None):
     sign = req.text if req and req.text else None
     return stabilizer.force_commit_sign(sign)
+
+class WordCommitRequest(BaseModel):
+    word: str
+
+
+@app.post("/api/buffer/word")
+def buffer_word(req: WordCommitRequest):
+    """Adds a whole word to the buffer (used when the user picks the right word from the model's guesses)."""
+    word = "".join(ch for ch in req.word.upper() if ch.isalpha())[:24]
+    if not word:
+        raise HTTPException(status_code=400, detail="Not a word")
+    return stabilizer.force_commit_word(word)
+
 
 @app.post("/api/buffer/space")
 def buffer_space():

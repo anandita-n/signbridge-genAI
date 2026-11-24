@@ -67,16 +67,6 @@ const elements = {
   copyRefinedBtn:     document.getElementById("copy-refined-btn"),
   speakRefinedBtn:    document.getElementById("speak-refined-btn"),
 
-  // Evaluation
-  metricAccuracy:          document.getElementById("metric-accuracy"),
-  metricPrecision:         document.getElementById("metric-precision"),
-  metricRecall:            document.getElementById("metric-recall"),
-  metricF1:                document.getElementById("metric-f1"),
-  metricLatency:           document.getElementById("metric-latency"),
-  confusionMatrixContainer:document.getElementById("confusion-matrix-container"),
-  perClassTbody:           document.getElementById("per-class-tbody"),
-  retrainModelBtn:         document.getElementById("retrain-model-btn"),
-
   // Alphabet & History
   alphabetGridContainer: document.getElementById("alphabet-grid-container"),
   historyListContainer:  document.getElementById("history-list-container"),
@@ -176,7 +166,6 @@ document.addEventListener("DOMContentLoaded", () => {
   setupGenerativeAiActions();
   setupSpeechVoices();
   loadSystemStatus();
-  loadEvaluationMetrics();
   renderAlphabetGuide();
   loadTranslationHistory();
 
@@ -262,7 +251,7 @@ async function startCamera() {
     elements.canvas.height = elements.video.videoHeight || 480;
 
     state.cameraActive = true;
-    elements.toggleCameraBtn.innerHTML = `<span>⏹️</span> Stop Camera`;
+    elements.toggleCameraBtn.innerHTML = `Stop Camera`;
     elements.toggleCameraBtn.style.background = "linear-gradient(135deg, #c0392b, #96281b)";
 
     if (!state.hands && window.Hands) initClientMediaPipe();
@@ -280,7 +269,7 @@ function stopCamera() {
   }
   elements.video.srcObject = null;
   state.cameraActive = false;
-  elements.toggleCameraBtn.innerHTML = `<span>📹</span> Start Camera`;
+  elements.toggleCameraBtn.innerHTML = `Start Camera`;
   elements.toggleCameraBtn.style.background = "";
   elements.fpsBadge.textContent = "0 FPS";
   elements.handStatusBadge.textContent = "Camera Off";
@@ -364,14 +353,16 @@ async function onMediaPipeResults(results) {
   if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
     elements.handStatusBadge.textContent = "No Hand Detected";
     elements.handStatusBadge.style.color = "";
+    autoWordTrack(null);
     updatePredictionDisplay({ sign: "---", confidence: 0.0, candidates: [] }, { stability_ratio: 0.0 });
     return;
   }
 
-  elements.handStatusBadge.textContent = "Hand Tracked ✓";
+  elements.handStatusBadge.textContent = "Hand Tracked";
   elements.handStatusBadge.style.color = "#5a8a60";
 
   const landmarks = results.multiHandLandmarks[0];
+  autoWordTrack(landmarks);
   drawHandLandmarks(ctx, landmarks, elements.canvas.width, elements.canvas.height);
 
   try {
@@ -407,7 +398,7 @@ async function captureAndSendBackendFrame() {
     ctx.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
 
     if (data.hand_detected && data.landmarks_pixel) {
-      elements.handStatusBadge.textContent = "Hand Tracked (Backend) ✓";
+      elements.handStatusBadge.textContent = "Hand Tracked (Backend)";
       elements.handStatusBadge.style.color = "#5a8a60";
       drawPixelLandmarks(ctx, data.landmarks_pixel, data.bbox);
     } else {
@@ -487,6 +478,11 @@ function handlePredictionResult(data) {
   const pred = data.prediction;
   const stab = data.stabilizer || {};
   updatePredictionDisplay(pred, stab);
+  if (pred.motion_detected) {   // J, Z, HELLO, I LOVE YOU, YES or PLEASE was just recognised: not a word-model sign
+    AUTO_WORD.signStart = null;
+    AUTO_WORD.samples.length = 0;
+    AUTO_WORD.busyUntil = performance.now() + 2500;
+  }
   if (stab.committed_action) flashCommittedSign(stab.committed_action);
   if (stab.text_state) updateWorkspaceBuffer(stab.text_state);
 }
@@ -512,7 +508,7 @@ function updatePredictionDisplay(pred, stab) {
 
   if (elements.holdStatusLabel) {
     if (isLocked) {
-      elements.holdStatusLabel.textContent = "✓ Recorded — release to sign next";
+      elements.holdStatusLabel.textContent = "Recorded — release to sign next";
       elements.holdStatusLabel.className   = "hold-status-pill locked";
     } else if (progress > 0.15) {
       elements.holdStatusLabel.textContent = `Holding… ${Math.round(progress * 100)}%`;
@@ -568,7 +564,7 @@ async function captionCurrentSign() {
     document.getElementById("caption-text").textContent      = data.caption || "";
     document.getElementById("caption-vlm-sign").textContent  = data.vlm_sign || "-";
     document.getElementById("caption-agreement").textContent = data.agrees_with_classifier
-      ? "✓ agrees with classifier" : "≠ differs from classifier";
+      ? "Agrees with classifier" : "Differs from classifier";
     document.getElementById("caption-reasoning").textContent = data.reasoning || "";
     document.getElementById("caption-provider").textContent  = data.provider || "";
     document.getElementById("caption-result").style.display  = "block";
@@ -597,7 +593,243 @@ async function useCaptionedLetter() {
   }
 }
 
+/* ════════════════════════════════════════════════════════════════
+   Word-level sign recognition (records ~2.5 s of frames, server classifies the clip)
+════════════════════════════════════════════════════════════════ */
+
+const WORD_RECORD_MS = 2500;
+const WORD_FRAME_INTERVAL_MS = 50;
+
+function captureSmallFrame() {
+  const video = document.getElementById("webcam-video");
+  if (!video || !video.videoWidth) return null;
+  const canvas = document.createElement("canvas");
+  const scale = Math.min(1, 480 / video.videoWidth);
+  canvas.width  = Math.round(video.videoWidth * scale);
+  canvas.height = Math.round(video.videoHeight * scale);
+  canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.7);
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+/* Counts down, then records WORD_RECORD_MS of small frames. Pauses automatic word detection meanwhile. */
+async function recordClip(statusEl) {
+  AUTO_WORD.inFlight = true;
+  try {
+    for (const n of [3, 2, 1]) {
+      statusEl.textContent = `Get ready... ${n}`;
+      await sleep(700);
+    }
+    statusEl.textContent = "Recording - sign your word now";
+    const frames = [];
+    const start = performance.now();
+    while (performance.now() - start < WORD_RECORD_MS) {
+      const f = captureSmallFrame();
+      if (f) frames.push(f);
+      await sleep(WORD_FRAME_INTERVAL_MS);
+    }
+    const seconds = (performance.now() - start) / 1000;
+    return { frames, fps: frames.length / seconds };
+  } finally {
+    AUTO_WORD.inFlight = false;
+    AUTO_WORD.busyUntil = performance.now() + AUTO_WORD.cooldownMs;
+    AUTO_WORD.signStart = null;
+    AUTO_WORD.samples.length = 0;
+  }
+}
+
+async function postJson(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {})
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+async function recordAndRecognizeWord() {
+  const btn = document.getElementById("word-sign-btn");
+  const status = document.getElementById("word-status");
+  const result = document.getElementById("word-result");
+
+  if (!state.cameraActive || !captureSmallFrame()) {
+    status.textContent = "Start the camera first, then try again.";
+    return;
+  }
+
+  btn.disabled = true;
+  result.innerHTML = "";
+  try {
+    const clip = await recordClip(status);
+    status.textContent = "Recognising...";
+    showWordResult(await postJson("/api/word/recognize", { frames: clip.frames, fps: clip.fps, commit: true }));
+  } catch (e) {
+    console.error("Word recognition error:", e);
+    status.textContent = `Could not recognise the word: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function showWordResult(data) {
+  const status = document.getElementById("word-status");
+  const result = document.getElementById("word-result");
+  status.textContent = data.message;
+  result.style.display = "flex";
+  // Each guess is a button: if the model was unsure, tap the word you actually signed to add it.
+  result.innerHTML = (data.top || []).map(t =>
+    `<button type="button" class="candidate-chip word-pick" data-word="${escapeHtml(t.word)}" ` +
+    `title="Add this word">${escapeHtml(t.word)}: ${(t.confidence * 100).toFixed(0)}%</button>`
+  ).join("");
+  result.querySelectorAll(".word-pick").forEach(btn => btn.addEventListener("click", async () => {
+    try {
+      const res = await fetch("/api/buffer/word", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ word: btn.dataset.word })
+      });
+      updateWorkspaceBuffer(await res.json());
+      flashCommittedSign(btn.dataset.word.toUpperCase());
+      status.textContent = `Added "${btn.dataset.word}".`;
+    } catch (e) {
+      status.textContent = "Could not add that word.";
+    }
+  }));
+  if (data.accepted && data.text_state) {
+    updateWorkspaceBuffer(data.text_state);
+    flashCommittedSign(data.word.toUpperCase());
+  }
+}
+
+/* Automatic word spotting: a moving sign followed by a rest is cut out of a rolling buffer of
+   recent frames and sent to the word model. Static fingerspelled letters barely move the wrist,
+   so they never trigger this. */
+const AUTO_WORD = {
+  frameEveryMs: 80,        // rolling frame buffer rate
+  keepMs: 4500,            // how much history is kept
+  windowMs: 900,           // motion is measured over this window
+  moveThreshold: 1.8,      // wrist path length (in hand sizes) inside the window that counts as "moving"
+  restMs: 400,             // stillness that ends a sign
+  minSignMs: 700,
+  maxSignMs: 3600,
+  padMs: 250,
+  cooldownMs: 1800,
+  minConfidence: 0.5,
+  frames: [],              // {t, url}
+  samples: [],             // {t, x, y, size}
+  signStart: null,
+  lastMoveT: 0,
+  busyUntil: 0,
+  inFlight: false,
+};
+
+function autoWordEnabled() {
+  const el = document.getElementById("auto-word-toggle");
+  return !!(el && el.checked && state.cameraActive);
+}
+
+function autoWordCaptureTick() {
+  if (!autoWordEnabled()) { AUTO_WORD.frames.length = 0; return; }
+  const url = captureSmallFrame();
+  if (!url) return;
+  const t = performance.now();
+  AUTO_WORD.frames.push({ t, url });
+  while (AUTO_WORD.frames.length && t - AUTO_WORD.frames[0].t > AUTO_WORD.keepMs) AUTO_WORD.frames.shift();
+}
+
+/* landmarks: MediaPipe hand landmarks for the first hand, or null when no hand is visible */
+function autoWordTrack(landmarks) {
+  if (!autoWordEnabled()) return;
+  const now = performance.now();
+  if (landmarks) {
+    const w = landmarks[0], m = landmarks[9];
+    const size = Math.max(Math.hypot(w.x - m.x, w.y - m.y), 0.02);
+    AUTO_WORD.samples.push({ t: now, x: w.x, y: w.y, size });
+  }
+  while (AUTO_WORD.samples.length && now - AUTO_WORD.samples[0].t > AUTO_WORD.windowMs) AUTO_WORD.samples.shift();
+
+  const s = AUTO_WORD.samples;
+  let path = 0;
+  for (let i = 1; i < s.length; i++) path += Math.hypot(s[i].x - s[i - 1].x, s[i].y - s[i - 1].y) / s[i].size;
+  const moving = path > AUTO_WORD.moveThreshold;
+
+  if (moving) {
+    if (AUTO_WORD.signStart === null) AUTO_WORD.signStart = now - AUTO_WORD.windowMs;
+    AUTO_WORD.lastMoveT = now;
+    return;
+  }
+  if (AUTO_WORD.signStart === null) return;
+
+  const rested = now - AUTO_WORD.lastMoveT;
+  const length = AUTO_WORD.lastMoveT - AUTO_WORD.signStart;
+  if (rested < AUTO_WORD.restMs && length < AUTO_WORD.maxSignMs) return;   // still waiting for the sign to end
+
+  const start = AUTO_WORD.signStart;
+  AUTO_WORD.signStart = null;
+  AUTO_WORD.samples.length = 0;
+  if (length < AUTO_WORD.minSignMs || now < AUTO_WORD.busyUntil || AUTO_WORD.inFlight) return;
+  sendAutoWord(start - AUTO_WORD.padMs, AUTO_WORD.lastMoveT + AUTO_WORD.padMs);
+}
+
+async function sendAutoWord(fromT, toT) {
+  const picked = AUTO_WORD.frames.filter(f => f.t >= fromT && f.t <= toT);
+  if (picked.length < 10) return;
+  AUTO_WORD.inFlight = true;
+  const status = document.getElementById("word-status");
+  status.textContent = "Checking for a word...";
+  try {
+    const seconds = (picked[picked.length - 1].t - picked[0].t) / 1000;
+    const res = await fetch("/api/word/recognize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        frames: picked.map(f => f.url),
+        fps: picked.length / Math.max(seconds, 0.1),
+        commit: true,
+        min_confidence: AUTO_WORD.minConfidence
+      })
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    showWordResult(await res.json());
+  } catch (e) {
+    console.error("Automatic word detection error:", e);
+    status.textContent = "Word detection failed. You can still use Record manually.";
+  } finally {
+    AUTO_WORD.inFlight = false;
+    AUTO_WORD.busyUntil = performance.now() + AUTO_WORD.cooldownMs;
+  }
+}
+
+setInterval(autoWordCaptureTick, AUTO_WORD.frameEveryMs);
+
+async function loadWordVocab() {
+  const el = document.getElementById("word-vocab");
+  const btn = document.getElementById("word-sign-btn");
+  try {
+    const data = await (await fetch("/api/word/vocab")).json();
+    if (!data.ready) {
+      el.textContent = "The word model is not installed on this server.";
+      btn.disabled = true;
+      return;
+    }
+    el.textContent = data.words.join(", ");
+  } catch (e) {
+    el.textContent = "Could not load the word list.";
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
+  const wordBtn = document.getElementById("word-sign-btn");
+  if (wordBtn) {
+    wordBtn.addEventListener("click", recordAndRecognizeWord);
+    loadWordVocab();
+  }
+
   const capBtn = document.getElementById("caption-sign-btn");
   const useBtn = document.getElementById("caption-use-btn");
   if (capBtn) capBtn.addEventListener("click", captionCurrentSign);
@@ -742,7 +974,7 @@ function setupGenerativeAiActions() {
     if (!rawText) { alert("Please assemble or type some sign tokens first."); return; }
 
     elements.refineAiBtn.disabled = true;
-    elements.refineAiBtn.innerHTML = `<span>⏳</span> Refining…`;
+    elements.refineAiBtn.innerHTML = `Refining…`;
 
     try {
       const resp = await fetch("/api/refine", {
@@ -770,7 +1002,7 @@ function setupGenerativeAiActions() {
       alert("Error refining text: " + err.message);
     } finally {
       elements.refineAiBtn.disabled = false;
-      elements.refineAiBtn.innerHTML = `<span>✨</span> Refine with Generative AI`;
+      elements.refineAiBtn.innerHTML = `Refine with Generative AI`;
     }
   });
 
@@ -778,8 +1010,8 @@ function setupGenerativeAiActions() {
   elements.copyRefinedBtn.addEventListener("click", () => {
     const txt = elements.refinedTextContent.textContent.trim();
     navigator.clipboard.writeText(txt);
-    elements.copyRefinedBtn.textContent = "✓";
-    setTimeout(() => { elements.copyRefinedBtn.textContent = "📋"; }, 1500);
+    elements.copyRefinedBtn.textContent = "Copied";
+    setTimeout(() => { elements.copyRefinedBtn.textContent = "Copy"; }, 1500);
   });
 
   // Speak refined text
@@ -797,7 +1029,7 @@ function displayRefinedResult(result) {
     elements.replyChipsList.innerHTML = result.suggestions.map(s =>
       `<div class="suggestion-chip" onclick="window.speakSuggestion('${escapeHtml(s)}')">
         <span>${s}</span>
-        <span style="font-size: 0.8rem; color: var(--text-muted);">🔊 Speak</span>
+        <span style="font-size: 0.8rem; color: var(--text-muted);">Speak</span>
       </div>`
     ).join("");
   } else {
@@ -850,71 +1082,6 @@ function speakText(text) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text, voice: state.selectedVoice, rate: 175 })
   }).catch(console.error);
-}
-
-
-/* ════════════════════════════════════════════════════════════════
-   9. Evaluation & Metrics Dashboard
-════════════════════════════════════════════════════════════════ */
-
-async function loadEvaluationMetrics() {
-  try {
-    const resp = await fetch("/api/metrics");
-    const data = await resp.json();
-    if (!data.overall) return;
-    elements.metricAccuracy.textContent  = `${(data.overall.accuracy * 100).toFixed(2)}%`;
-    elements.metricPrecision.textContent = `${(data.overall.macro_precision * 100).toFixed(2)}%`;
-    elements.metricRecall.textContent    = `${(data.overall.macro_recall * 100).toFixed(2)}%`;
-    elements.metricF1.textContent        = `${(data.overall.macro_f1 * 100).toFixed(2)}%`;
-    elements.metricLatency.textContent   = `${data.overall.inference_latency_ms.toFixed(3)} ms`;
-    renderConfusionMatrix(data);
-    renderPerClassTable(data);
-  } catch (err) {
-    console.error("Metrics load error:", err);
-  }
-}
-
-function renderConfusionMatrix(data) {
-  const classes = data.classes;
-  const cmNorm  = data.confusion_matrix_normalized;
-  if (!classes || !cmNorm) return;
-  const n = classes.length;
-  let html = `<div style="display: grid; grid-template-columns: 40px repeat(${n}, 26px); gap: 2px; align-items: center; justify-content: start;">
-    <div></div>
-    ${classes.map(c =>
-      `<div style="font-size:0.65rem;font-weight:700;text-align:center;color:var(--terracotta);">${c}</div>`
-    ).join("")}`;
-
-  for (let i = 0; i < n; i++) {
-    html += `<div style="font-size:0.65rem;font-weight:700;text-align:right;padding-right:4px;color:var(--terracotta);">${classes[i]}</div>`;
-    for (let j = 0; j < n; j++) {
-      const val = cmNorm[i][j];
-      const isDiag = i === j;
-      const bg = isDiag
-        ? `rgba(164, 74, 63, ${Math.max(0.15, val)})`
-        : val > 0.05 ? `rgba(241, 156, 121, ${val * 1.5})` : `rgba(203, 223, 189, 0.1)`;
-      html += `<div class="matrix-cell" style="background:${bg};" title="True: ${classes[i]}, Pred: ${classes[j]} (${(val*100).toFixed(1)}%)">
-        ${isDiag ? (val*100).toFixed(0) : (val > 0.1 ? (val*100).toFixed(0) : "")}
-      </div>`;
-    }
-  }
-  html += `</div>`;
-  elements.confusionMatrixContainer.innerHTML = html;
-}
-
-function renderPerClassTable(data) {
-  const perClass = data.per_class;
-  if (!perClass) return;
-  elements.perClassTbody.innerHTML = Object.keys(perClass).map(cls => {
-    const item = perClass[cls];
-    return `<tr>
-      <td style="font-weight:700; color:var(--terracotta);">${cls}</td>
-      <td>${(item.precision * 100).toFixed(1)}%</td>
-      <td>${(item.recall * 100).toFixed(1)}%</td>
-      <td style="color:var(--accent-success); font-weight:600;">${(item.f1_score * 100).toFixed(1)}%</td>
-      <td style="color:var(--text-muted);">${item.support}</td>
-    </tr>`;
-  }).join("");
 }
 
 
@@ -981,7 +1148,7 @@ async function loadTranslationHistory() {
           <div style="font-size:0.82rem; color:var(--text-muted);">Signs: <code style="background:var(--bg-surface-elevated); padding:1px 5px; border-radius:4px;">${item.raw_text}</code></div>
           <div style="font-size:1rem; font-weight:600; color:var(--text-primary);">${item.refined_text}</div>
         </div>
-        <button class="btn-icon" onclick="window.speakHistory('${escapeHtml(item.refined_text)}')" title="Speak">🔊</button>
+        <button class="btn-icon" onclick="window.speakHistory('${escapeHtml(item.refined_text)}')" title="Speak">Speak</button>
       </div>
     `).join("");
   } catch (err) {

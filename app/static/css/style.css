@@ -185,19 +185,32 @@ body {
 
 .status-dot.inactive { background: var(--text-dim); }
 
+.word-pick {
+  cursor: pointer;
+  border: 1px solid transparent;
+  font: inherit;
+}
+
+.word-pick:hover {
+  border-color: var(--terracotta, #9b4a3c);
+}
+
 .btn-icon {
   background: var(--bg-surface-elevated);
   border: 1.5px solid var(--border-subtle);
   color: var(--text-secondary);
-  width: 36px;
+  min-width: 36px;
   height: 36px;
+  padding: 0 12px;
   border-radius: var(--radius-md);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   transition: all 0.15s ease;
-  font-size: 0.95rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .btn-icon:hover {
@@ -722,66 +735,6 @@ body {
   color: var(--text-primary);
   border-color: var(--border-active);
   background: var(--bg-surface-hover);
-}
-
-/* ══════════════════════════════════
-   METRICS DASHBOARD
-══════════════════════════════════ */
-.metrics-overview {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 14px;
-  margin-bottom: 24px;
-}
-
-.metric-stat-card {
-  background: var(--bg-surface-elevated);
-  border-radius: var(--radius-md);
-  border: 1.5px solid var(--border-subtle);
-  padding: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  transition: box-shadow 0.15s ease;
-}
-
-.metric-stat-card:hover {
-  box-shadow: var(--shadow-card);
-}
-
-.stat-value {
-  font-size: 1.9rem;
-  font-weight: 800;
-  color: var(--terracotta);
-  letter-spacing: -0.025em;
-}
-
-.stat-label {
-  font-size: 0.74rem;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-weight: 600;
-}
-
-.confusion-matrix-wrapper {
-  overflow-x: auto;
-  padding: 16px;
-  background: var(--bg-surface-elevated);
-  border-radius: var(--radius-md);
-  border: 1.5px solid var(--border-subtle);
-}
-
-.matrix-cell {
-  width: 26px;
-  height: 26px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.6rem;
-  font-weight: 600;
-  border-radius: 3px;
-  color: var(--text-primary);
 }
 
 /* ══════════════════════════════════
