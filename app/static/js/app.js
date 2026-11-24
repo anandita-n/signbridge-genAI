@@ -289,7 +289,7 @@ function initClientMediaPipe() {
       locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
     });
     state.hands.setOptions({
-      maxNumHands: 1,
+      maxNumHands: 2,
       modelComplexity: 1,
       minDetectionConfidence: 0.45,
       minTrackingConfidence: 0.45
@@ -346,6 +346,22 @@ function calculateFPS() {
   }
 }
 
+// Letters and motion signs are one-handed, so with two hands in view we classify the one held higher
+// (the resting hand is lower). A small margin stops the choice flipping when both hands are level.
+let signingHandY = null;
+function pickSigningHand(hands) {
+  if (hands.length === 1) { signingHandY = hands[0][0].y; return hands[0]; }
+  const sorted = [...hands].sort((a, b) => a[0].y - b[0].y);
+  const higher = sorted[0], lower = sorted[1];
+  if (signingHandY !== null && Math.abs(lower[0].y - signingHandY) < Math.abs(higher[0].y - signingHandY)
+      && lower[0].y - higher[0].y < 0.08) {
+    signingHandY = lower[0].y;
+    return lower;
+  }
+  signingHandY = higher[0].y;
+  return higher;
+}
+
 async function onMediaPipeResults(results) {
   const ctx = elements.canvas.getContext("2d");
   ctx.clearRect(0, 0, elements.canvas.width, elements.canvas.height);
@@ -361,9 +377,11 @@ async function onMediaPipeResults(results) {
   elements.handStatusBadge.textContent = "Hand Tracked";
   elements.handStatusBadge.style.color = "#5a8a60";
 
-  const landmarks = results.multiHandLandmarks[0];
-  autoWordTrack(landmarks);
-  drawHandLandmarks(ctx, landmarks, elements.canvas.width, elements.canvas.height);
+  const hands = results.multiHandLandmarks;
+  const landmarks = pickSigningHand(hands);
+  autoWordTrack(hands);
+  hands.forEach(h => drawHandLandmarks(ctx, h, elements.canvas.width, elements.canvas.height));
+  elements.handStatusBadge.textContent = hands.length > 1 ? "2 Hands Tracked" : "Hand Tracked";
 
   try {
     const resp = await fetch("/api/recognize/landmarks", {
@@ -743,13 +761,18 @@ function autoWordCaptureTick() {
 }
 
 /* landmarks: MediaPipe hand landmarks for the first hand, or null when no hand is visible */
-function autoWordTrack(landmarks) {
+function autoWordTrack(hands) {
   if (!autoWordEnabled()) return;
   const now = performance.now();
-  if (landmarks) {
-    const w = landmarks[0], m = landmarks[9];
-    const size = Math.max(Math.hypot(w.x - m.x, w.y - m.y), 0.02);
-    AUTO_WORD.samples.push({ t: now, x: w.x, y: w.y, size });
+  if (hands && hands.length) {
+    // Track the average of all visible wrists, so movement of either hand starts a word and
+    // swapped hand order between frames does not look like movement.
+    let x = 0, y = 0, size = 0;
+    hands.forEach(h => {
+      x += h[0].x; y += h[0].y;
+      size += Math.max(Math.hypot(h[0].x - h[9].x, h[0].y - h[9].y), 0.02);
+    });
+    AUTO_WORD.samples.push({ t: now, x: x / hands.length, y: y / hands.length, size: size / hands.length });
   }
   while (AUTO_WORD.samples.length && now - AUTO_WORD.samples[0].t > AUTO_WORD.windowMs) AUTO_WORD.samples.shift();
 
