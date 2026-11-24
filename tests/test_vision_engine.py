@@ -95,3 +95,49 @@ class TestCaptionEndpoint(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHandFacts(unittest.TestCase):
+    """The measured finger facts and the hand crop that are given to the VLM."""
+
+    @staticmethod
+    def _hand(extended=(), thumb_out=False):
+        pts = [[0.5, 0.8, 0.0] for _ in range(21)]
+        pts[9] = [0.5, 0.6, 0.0]                       # middle knuckle 0.2 above the wrist
+        for name, (mcp, tip) in {"index": (5, 8), "middle": (9, 12), "ring": (13, 16), "pinky": (17, 20)}.items():
+            x = {"index": 0.44, "middle": 0.5, "ring": 0.56, "pinky": 0.62}[name]
+            pts[mcp] = [x, 0.6, 0.0]
+            pts[tip] = [x, 0.2 if name in extended else 0.68, 0.0]
+        pts[4] = [0.3, 0.7, 0.0] if thumb_out else [0.5, 0.65, 0.0]
+        return pts
+
+    def test_facts_name_the_extended_fingers(self):
+        from app.vision_engine import describe_hand
+        text = describe_hand(self._hand(extended={"index", "middle"}))
+        self.assertIn("index finger: fully extended", text)
+        self.assertIn("ring finger: curled", text)
+        self.assertIn("pointing up", text)
+
+    def test_facts_report_thumb_out(self):
+        from app.vision_engine import describe_hand
+        self.assertIn("sticking out", describe_hand(self._hand(thumb_out=True)))
+        self.assertIn("tucked", describe_hand(self._hand()))
+
+    def test_crop_is_a_larger_square_around_the_hand(self):
+        import cv2
+        import numpy as np
+        from app.vision_engine import crop_to_hand
+        img = np.zeros((480, 640, 3), np.uint8)
+        ok, buf = cv2.imencode(".jpg", img)
+        out = cv2.imdecode(np.frombuffer(crop_to_hand(buf.tobytes(), self._hand()), np.uint8), cv2.IMREAD_COLOR)
+        self.assertGreaterEqual(max(out.shape[:2]), 512)
+        self.assertLess(out.shape[1], 640 * 2)
+
+    def test_bad_landmarks_return_the_original_image(self):
+        from app.vision_engine import crop_to_hand
+        self.assertEqual(crop_to_hand(b"not-an-image", [[0, 0, 0]] * 21), b"not-an-image")
+
+    def test_prompt_includes_measured_facts(self):
+        engine = VisionEngine(_NoClientLLM())
+        prompt = engine._build_prompt([{"sign": "U", "confidence": 0.6}], "- index finger: fully extended")
+        self.assertIn("index finger: fully extended", prompt)

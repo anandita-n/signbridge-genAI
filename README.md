@@ -65,7 +65,7 @@ WLASL is for academic and non-commercial use only.
 python -m unittest discover tests
 ```
 
-All 74 tests run offline, with no API key or network needed.
+All 81 tests run offline, with no API key or network needed.
 
 ## Main API routes
 
@@ -78,6 +78,10 @@ All 74 tests run offline, with no API key or network needed.
 | `POST /api/refine` | Turn raw signs into a sentence |
 | `POST /api/chat/reply` | Suggest replies for the hearing partner |
 | `GET /api/status` | Model readiness and config |
+
+## Credits
+
+The fingerspelling reference drawings in `app/static/img/asl/` are the public-domain "Sign language A-Z.svg" files from Wikimedia Commons (originally from WPClipart). Letter training data: sid220/asl-now-fingerspelling (MIT). Word data: WLASL100 (academic use).
 
 ## Privacy
 

@@ -768,12 +768,20 @@ body {
   background: var(--bg-surface);
 }
 
-.letter-card img {
+.letter-pose {
   width: 100%;
-  aspect-ratio: 1;
-  object-fit: cover;
+  aspect-ratio: 4 / 5;
+  object-fit: contain;
+  padding: 8px;
+  background: #fff;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-subtle);
+}
+
+.letter-motion {
+  font-size: 0.62rem;
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 .letter-badge-lg {

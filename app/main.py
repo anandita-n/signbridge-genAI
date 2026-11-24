@@ -153,6 +153,8 @@ class FrameRecognizeRequest(BaseModel):
 class CaptionRequest(BaseModel):
     image_base64: str  # JPEG/PNG data URL or raw base64
     candidates: Optional[List[Dict[str, Any]]] = None  # classifier top-k: [{"sign": "M", "confidence": 0.6}]
+    landmarks: Optional[List[List[float]]] = None  # 21 [x, y, z] points of the signing hand (0-1 of the frame)
+    hand_detected: Optional[bool] = None  # the browser's live tracker saw a hand just now
 
 class WordRequest(BaseModel):
     frames: List[str]                      # JPEG/PNG data URLs, in time order
@@ -423,7 +425,9 @@ def caption_sign_image(req: CaptionRequest):
     # Hand gate: if MediaPipe finds no hand in a decodable frame, don't ask the VLM
     # (it can hallucinate a hand on empty frames, and this saves API quota).
     frame_bgr = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
-    if frame_bgr is not None and not landmark_extractor.extract_from_frame(frame_bgr):
+    # If the browser's live tracker already saw a hand, trust it: the server detector is stricter and was
+    # rejecting frames the live view tracked fine.
+    if req.hand_detected is not True and frame_bgr is not None and not landmark_extractor.extract_from_frame(frame_bgr):
         return {
             "caption": "No hand detected in the frame. Hold your hand up clearly in view of the camera.",
             "vlm_sign": "NONE",
@@ -433,7 +437,7 @@ def caption_sign_image(req: CaptionRequest):
             "provider": "SignBridge hand check",
         }
 
-    return vision_engine.caption_sign(image_bytes, req.candidates, mime_type=mime_type)
+    return vision_engine.caption_sign(image_bytes, req.candidates, mime_type=mime_type, landmarks=req.landmarks)
 
 
 # --- Text Buffer Management ---

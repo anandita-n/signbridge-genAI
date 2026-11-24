@@ -140,21 +140,6 @@ const ASL_GUIDE_DATA = {
   "CLEAR": "Open palm waving side to side — clears all text."
 };
 
-// Real ASL fingerspelling photos from Lifeprint / ASL University (CC educational use)
-const ASL_IMAGE_URLS = (() => {
-  const base = "https://www.lifeprint.com/asl101/fingerspelling/images/";
-  const map = {};
-  "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").forEach(l => {
-    map[l] = `${base}${l.toLowerCase()}.jpg`;
-  });
-  // For special tokens — use a neutral reference
-  map["SPACE"] = `${base}space.gif`;
-  map["DEL"]   = "";
-  map["CLEAR"] = "";
-  return map;
-})();
-
-
 /* ════════════════════════════════════════════════════════════════
    1. Initialization & Event Listeners
 ════════════════════════════════════════════════════════════════ */
@@ -349,6 +334,8 @@ function calculateFPS() {
 // Letters and motion signs are one-handed, so with two hands in view we classify the one held higher
 // (the resting hand is lower). A small margin stops the choice flipping when both hands are level.
 let signingHandY = null;
+let lastSigningLandmarks = null;   // the hand the caption button describes
+let lastHandSeenAt = -Infinity;   // when the live tracker last saw a hand (used by the caption button)
 function pickSigningHand(hands) {
   if (hands.length === 1) { signingHandY = hands[0][0].y; return hands[0]; }
   const sorted = [...hands].sort((a, b) => a[0].y - b[0].y);
@@ -378,7 +365,9 @@ async function onMediaPipeResults(results) {
   elements.handStatusBadge.style.color = "#5a8a60";
 
   const hands = results.multiHandLandmarks;
+  lastHandSeenAt = performance.now();
   const landmarks = pickSigningHand(hands);
+  lastSigningLandmarks = landmarks;
   autoWordTrack(hands);
   hands.forEach(h => drawHandLandmarks(ctx, h, elements.canvas.width, elements.canvas.height));
   elements.handStatusBadge.textContent = hands.length > 1 ? "2 Hands Tracked" : "Hand Tracked";
@@ -574,7 +563,13 @@ async function captionCurrentSign() {
     const res = await fetch("/api/caption", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image_base64: frame, candidates })
+      body: JSON.stringify({
+        image_base64: frame,
+        candidates,
+        landmarks: (performance.now() - lastHandSeenAt < 1500 && lastSigningLandmarks)
+          ? lastSigningLandmarks.map(p => [p.x, p.y, p.z]) : null,
+        hand_detected: performance.now() - lastHandSeenAt < 1500
+      })
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
@@ -585,6 +580,11 @@ async function captionCurrentSign() {
       ? "Agrees with classifier" : "Differs from classifier";
     document.getElementById("caption-reasoning").textContent = data.reasoning || "";
     document.getElementById("caption-provider").textContent  = data.provider || "";
+    // When no hand was found the VLM was never called, so there is no letter to compare or use.
+    const noLetter = !data.vlm_sign || data.vlm_sign === "NONE";
+    document.getElementById("caption-vlm-sign").parentElement.style.display = noLetter ? "none" : "";
+    document.getElementById("caption-agreement").style.display = noLetter ? "none" : "";
+    document.getElementById("caption-use-btn").style.display   = noLetter ? "none" : "";
     document.getElementById("caption-result").style.display  = "block";
   } catch (e) {
     console.error("Caption error:", e);
@@ -1112,23 +1112,23 @@ function speakText(text) {
    10. ASL Alphabet Guide (with real photos)
 ════════════════════════════════════════════════════════════════ */
 
+// Reference drawings: public-domain "Sign language X.svg" files from Wikimedia Commons (see README).
+const MOTION_LETTERS = new Set(["J", "Z"]);
+
 function renderAlphabetGuide() {
   const letters = Object.keys(ASL_GUIDE_DATA);
   elements.alphabetGridContainer.innerHTML = letters.map(letter => {
-    const desc    = ASL_GUIDE_DATA[letter];
-    const imgUrl  = ASL_IMAGE_URLS[letter];
-    const imgHtml = imgUrl
-      ? `<img
-           src="${imgUrl}"
-           alt="ASL sign for ${letter}"
-           loading="lazy"
-           onerror="this.style.display='none'"
-         />`
+    const desc = ASL_GUIDE_DATA[letter];
+    const art = letter.length === 1
+      ? `<img class="letter-pose" src="/static/img/asl/${letter}.svg" alt="ASL sign for ${letter}" loading="lazy" ` +
+        `onerror="this.style.display='none'">`
       : "";
+    const motion = MOTION_LETTERS.has(letter) ? `<div class="letter-motion">the hand moves along the arrow</div>` : "";
     return `
-      <div class="letter-card" onclick="window.testSignLetter('${letter}')">
-        ${imgHtml}
+      <div class="letter-card" onclick="window.testSignLetter('${letter}')" title="Click to add ${letter} to the text">
+        ${art}
         <div class="letter-badge-lg">${letter}</div>
+        ${motion}
         <div class="letter-desc">${desc}</div>
       </div>
     `;
