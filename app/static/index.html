@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/css/style.css?v=3">
+  <link rel="stylesheet" href="/static/css/style.css?v=5">
   <!-- MediaPipe Hands & Camera Utils (Local bundle for offline reliability) -->
   <script src="/static/js/vendor/camera_utils.js"></script>
   <script src="/static/js/vendor/hands.js"></script>
@@ -37,18 +37,6 @@
       </button>
     </nav>
 
-    <!-- Header Actions -->
-    <div class="header-actions">
-      <div class="status-badge" id="backend-status">
-        <span class="status-dot"></span>
-        <span id="backend-status-text">Model Ready (29 Classes)</span>
-      </div>
-      <div class="status-badge" id="gemini-status">
-        <span class="status-dot inactive" id="gemini-dot"></span>
-        <span id="gemini-status-text">AI Engine: Ready</span>
-      </div>
-      <button class="btn-icon" id="open-settings-btn" title="Settings">Settings</button>
-    </div>
   </header>
 
   <main class="app-container">
@@ -119,13 +107,6 @@
               <button class="btn-secondary" id="flip-camera-btn">
                 Flip
               </button>
-            </div>
-            <div style="display: flex; gap: 8px; align-items: center;">
-              <label style="font-size: 0.8rem; color: var(--text-muted);" for="camera-mode-select">Mode:</label>
-              <select id="camera-mode-select" class="text-input-field" style="width: auto; padding: 6px 12px; font-size: 0.82rem;">
-                <option value="client_mediapipe" selected>Client (60fps)</option>
-                <option value="backend_mediapipe">Backend (LiteRT)</option>
-              </select>
             </div>
           </div>
 
@@ -325,49 +306,6 @@
 
   </main>
 
-  <!-- Settings Modal -->
-  <div class="modal-backdrop" id="settings-modal">
-    <div class="modal-dialog">
-      <div class="modal-header">
-        <h3 class="modal-title">Signet Settings</h3>
-        <button class="btn-icon" id="close-settings-btn">Close</button>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label" for="setting-gemini-key">Google Gemini API Key:</label>
-        <input 
-          type="password" 
-          class="text-input-field" 
-          id="setting-gemini-key" 
-          placeholder="Enter GEMINI_API_KEY (optional — offline engine active)"
-        />
-        <span style="font-size: 0.72rem; color: var(--text-dim);">
-          When provided, uses Gemini 2.5 Flash for contextual refinement. Leave blank to use the built-in linguistic engine.
-        </span>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label" for="setting-conf-threshold">Recognition Confidence Threshold (<span id="conf-val-label">0.65</span>):</label>
-        <input type="range" min="0.4" max="0.95" step="0.05" value="0.65" id="setting-conf-threshold" style="width: 100%;">
-      </div>
-
-      <div class="form-group">
-        <label class="form-label" for="setting-stability-frames">Stability Hold Frames (<span id="stab-val-label">6</span> frames):</label>
-        <input type="range" min="3" max="15" step="1" value="6" id="setting-stability-frames" style="width: 100%;">
-      </div>
-
-      <div class="form-group">
-        <label class="form-label" for="setting-tts-voice">Text-To-Speech Voice:</label>
-        <select class="text-input-field" id="setting-tts-voice"></select>
-      </div>
-
-      <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px;">
-        <button class="btn-secondary" id="cancel-settings-btn">Cancel</button>
-        <button class="btn-primary" id="save-settings-btn">Save Settings</button>
-      </div>
-    </div>
-  </div>
-
-  <script src="/static/js/app.js?v=3"></script>
+  <script src="/static/js/app.js?v=5"></script>
 </body>
 </html>

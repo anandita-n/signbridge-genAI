@@ -28,17 +28,11 @@ const elements = {
   navTabs:  document.querySelectorAll(".nav-tab"),
   tabPanes: document.querySelectorAll(".tab-pane"),
 
-  // Status
-  backendStatus:    document.getElementById("backend-status-text"),
-  geminiDot:        document.getElementById("gemini-dot"),
-  geminiStatus:     document.getElementById("gemini-status-text"),
-
   // Video & Prediction
   video:            document.getElementById("webcam-video"),
   canvas:           document.getElementById("overlay-canvas"),
   toggleCameraBtn:  document.getElementById("toggle-camera-btn"),
   flipCameraBtn:    document.getElementById("flip-camera-btn"),
-  cameraModeSelect: document.getElementById("camera-mode-select"),
   fpsBadge:         document.getElementById("fps-badge"),
   handStatusBadge:  document.getElementById("hand-status-badge"),
   predictedChar:    document.getElementById("predicted-char"),
@@ -71,20 +65,7 @@ const elements = {
   alphabetGridContainer: document.getElementById("alphabet-grid-container"),
   historyListContainer:  document.getElementById("history-list-container"),
   exportHistoryBtn:      document.getElementById("export-history-json-btn"),
-  clearHistoryBtn:       document.getElementById("clear-history-btn"),
-
-  // Settings Modal
-  settingsModal:          document.getElementById("settings-modal"),
-  openSettingsBtn:        document.getElementById("open-settings-btn"),
-  closeSettingsBtn:       document.getElementById("close-settings-btn"),
-  cancelSettingsBtn:      document.getElementById("cancel-settings-btn"),
-  saveSettingsBtn:        document.getElementById("save-settings-btn"),
-  settingGeminiKey:       document.getElementById("setting-gemini-key"),
-  settingConfThreshold:   document.getElementById("setting-conf-threshold"),
-  confValLabel:           document.getElementById("conf-val-label"),
-  settingStabilityFrames: document.getElementById("setting-stability-frames"),
-  stabValLabel:           document.getElementById("stab-val-label"),
-  settingTtsVoice:        document.getElementById("setting-tts-voice")
+  clearHistoryBtn:       document.getElementById("clear-history-btn")
 };
 
 // ─── Hand topology ────────────────────────────────────────────────────────────
@@ -146,18 +127,11 @@ const ASL_GUIDE_DATA = {
 
 document.addEventListener("DOMContentLoaded", () => {
   setupNavigation();
-  setupSettingsModal();
   setupBufferActions();
   setupGenerativeAiActions();
-  setupSpeechVoices();
   loadSystemStatus();
   renderAlphabetGuide();
   loadTranslationHistory();
-
-  // Camera mode change
-  elements.cameraModeSelect.addEventListener("change", (e) => {
-    state.detectorMode = e.target.value;
-  });
 
   // Quick alphabet strip
   renderQuickAlphabetStrip();
@@ -267,7 +241,6 @@ function initClientMediaPipe() {
     if (!window.Hands) {
       console.warn("[MediaPipe] Hands not in window — using backend LiteRT.");
       state.detectorMode = "backend_mediapipe";
-      if (elements.cameraModeSelect) elements.cameraModeSelect.value = "backend_mediapipe";
       return;
     }
     state.hands = new Hands({
@@ -283,7 +256,6 @@ function initClientMediaPipe() {
   } catch (e) {
     console.warn("[MediaPipe] Fallback to backend:", e);
     state.detectorMode = "backend_mediapipe";
-    if (elements.cameraModeSelect) elements.cameraModeSelect.value = "backend_mediapipe";
   }
 }
 
@@ -302,8 +274,7 @@ function startFrameLoop() {
         } catch (err) {
           console.warn("Client MediaPipe error — falling back to backend:", err);
           state.detectorMode = "backend_mediapipe";
-          if (elements.cameraModeSelect) elements.cameraModeSelect.value = "backend_mediapipe";
-        }
+            }
         isProcessingFrame = false;
       }
     } else {
@@ -728,14 +699,15 @@ function showWordResult(data) {
    recent frames and sent to the word model. Static fingerspelled letters barely move the wrist,
    so they never trigger this. */
 const AUTO_WORD = {
-  frameEveryMs: 80,        // rolling frame buffer rate
+  frameEveryMs: 50,        // rolling frame buffer rate: 20 frames/s, the same as manual recording
   keepMs: 4500,            // how much history is kept
   windowMs: 900,           // motion is measured over this window
   moveThreshold: 1.8,      // wrist path length (in hand sizes) inside the window that counts as "moving"
-  restMs: 400,             // stillness that ends a sign
+  restMs: 500,             // stillness that ends a sign (a little longer, so a short pause does not split a word)
   minSignMs: 700,
   maxSignMs: 3600,
-  padMs: 250,
+  padStartMs: 500,         // include the lead-in before the movement started
+  padEndMs: 400,           // and the settling after it (the server trims idle frames anyway)
   cooldownMs: 1800,
   minConfidence: 0.5,
   frames: [],              // {t, url}
@@ -796,7 +768,7 @@ function autoWordTrack(hands) {
   AUTO_WORD.signStart = null;
   AUTO_WORD.samples.length = 0;
   if (length < AUTO_WORD.minSignMs || now < AUTO_WORD.busyUntil || AUTO_WORD.inFlight) return;
-  sendAutoWord(start - AUTO_WORD.padMs, AUTO_WORD.lastMoveT + AUTO_WORD.padMs);
+  sendAutoWord(start - AUTO_WORD.padStartMs, AUTO_WORD.lastMoveT + AUTO_WORD.padEndMs);
 }
 
 async function sendAutoWord(fromT, toT) {
@@ -1072,22 +1044,6 @@ function escapeHtml(text) {
    8. Text-To-Speech
 ════════════════════════════════════════════════════════════════ */
 
-function setupSpeechVoices() {
-  function populateVoices() {
-    if ("speechSynthesis" in window) {
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length > 0) {
-        elements.settingTtsVoice.innerHTML = voices
-          .filter(v => v.lang.startsWith("en"))
-          .map(v => `<option value="${v.name}">${v.name} (${v.lang})</option>`)
-          .join("");
-      }
-    }
-  }
-  populateVoices();
-  if ("speechSynthesis" in window) window.speechSynthesis.onvoiceschanged = populateVoices;
-}
-
 function speakText(text) {
   if (!text) return;
   if ("speechSynthesis" in window) {
@@ -1197,64 +1153,15 @@ elements.exportHistoryBtn.addEventListener("click", () => {
 
 
 /* ════════════════════════════════════════════════════════════════
-   12. System Status & Settings Modal
+   12. System Status
 ════════════════════════════════════════════════════════════════ */
 
 async function loadSystemStatus() {
   try {
-    const resp = await fetch("/api/status");
-    const data = await resp.json();
-    if (data.gemini_active) {
-      elements.geminiDot.classList.remove("inactive");
-      elements.geminiStatus.textContent = `Gemini: Online (${data.llm_model})`;
-    } else {
-      elements.geminiDot.classList.add("inactive");
-      elements.geminiStatus.textContent = "AI Engine: Offline Rules";
-    }
+    const data = await (await fetch("/api/status")).json();
     state.confidenceThreshold = data.confidence_threshold;
     state.stabilityFrames     = data.stability_frames;
-    elements.settingConfThreshold.value  = data.confidence_threshold;
-    elements.confValLabel.textContent    = data.confidence_threshold;
-    elements.settingStabilityFrames.value = data.stability_frames;
-    elements.stabValLabel.textContent    = data.stability_frames;
   } catch (e) {
     console.error("Status fetch error:", e);
   }
-}
-
-function setupSettingsModal() {
-  elements.openSettingsBtn.addEventListener("click", () => elements.settingsModal.classList.add("open"));
-  const closeModal = () => elements.settingsModal.classList.remove("open");
-  elements.closeSettingsBtn.addEventListener("click", closeModal);
-  elements.cancelSettingsBtn.addEventListener("click", closeModal);
-
-  elements.settingConfThreshold.addEventListener("input", (e) => {
-    elements.confValLabel.textContent = e.target.value;
-  });
-  elements.settingStabilityFrames.addEventListener("input", (e) => {
-    elements.stabValLabel.textContent = e.target.value;
-  });
-
-  elements.saveSettingsBtn.addEventListener("click", async () => {
-    const newKey   = elements.settingGeminiKey.value.trim();
-    const newConf  = parseFloat(elements.settingConfThreshold.value);
-    const newStab  = parseInt(elements.settingStabilityFrames.value, 10);
-    const newVoice = elements.settingTtsVoice.value;
-    state.selectedVoice = newVoice;
-
-    const payload = { confidence_threshold: newConf, stability_frames: newStab };
-    if (newKey) payload.gemini_api_key = newKey;
-
-    try {
-      await fetch("/api/settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      loadSystemStatus();
-      closeModal();
-    } catch (e) {
-      alert("Error saving settings: " + e.message);
-    }
-  });
 }
